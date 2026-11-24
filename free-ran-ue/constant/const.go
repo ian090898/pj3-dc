@@ -20,7 +20,8 @@ const (
 
 // for UE
 const (
-	PDU_SESSION_ID = 4
+	PDU_SESSION_ID        = 4
+	SECOND_PDU_SESSION_ID = 5
 )
 
 // between RAN and UE

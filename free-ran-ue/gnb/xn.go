@@ -124,6 +124,12 @@ func buildDCQosFlowPerTNLInformationItem(dlTeid []byte, ranN3Ip string) ie.QosFl
 }
 
 func xnPduSessionResourceSetupProcessor(g *Gnb, conn net.Conn, imsi string, msg *message.PDUSessionResourceSetupRequest) {
+	sessionID, err := pduSessionIDFromSetupRequest(msg)
+	if err != nil {
+		g.XnLog.Warnf("Invalid Xn PDU Session Setup Request: %v", err)
+		return
+	}
+
 	var pduSessionResourceSetupRequestTransfer ie.PDUSessionResourceSetupRequestTransfer
 
 	if msg.PDUSessionResourceSetupListSUReq != nil {
@@ -139,24 +145,26 @@ func xnPduSessionResourceSetupProcessor(g *Gnb, conn net.Conn, imsi string, msg 
 		}
 	}
 
-	xnUe := NewXnUe(imsi, g.teidGenerator.AllocateTeid(), nil)
-	g.xnUeConns.Store(xnUe, struct{}{})
-	g.XnLog.Debugf("Allocated DLTEID for XnUe: %s", hex.EncodeToString(xnUe.GetDlTeid()))
-
-	if pduSessionResourceSetupRequestTransfer.ProtocolIEs != nil {
-		for _, item := range pduSessionResourceSetupRequestTransfer.ProtocolIEs.List {
-			if item.AdditionalULNGUUPTNLInformation == nil || len(item.AdditionalULNGUUPTNLInformation.List) == 0 {
-				continue
-			}
-			nguUpTnlInformation := item.AdditionalULNGUUPTNLInformation.List[0].NGUUPTNLInformation
-			if nguUpTnlInformation == nil {
-				continue
-			}
-			if gtpTunnel, ok := nguUpTnlInformation.Choice.(*ie.GTPTunnel); ok && gtpTunnel.GTPTEID != nil {
-				xnUe.SetUlTeid(gtpTunnel.GTPTEID.Value)
-			}
-		}
+	ulTeid, err := primaryUlTeidFromSetupTransfer(
+		&pduSessionResourceSetupRequestTransfer,
+	)
+	if err != nil {
+		g.XnLog.Warnf(
+			"Session %d: failed to obtain UL TEID: %v",
+			sessionID, err,
+		)
+		return
 	}
+
+	xnUe := NewXnUe(imsi, g.teidGenerator.AllocateTeid(), nil)
+	xnUe.SetUlTeid(ulTeid)
+	g.xnUeConns.Store(xnUe, struct{}{})
+
+	g.XnLog.Infof(
+		"Secondary RAN Session %d UL TEID: %s",
+		sessionID,
+		hex.EncodeToString(ulTeid),
+	)
 
 	// DC QoS Flow per TNL Information
 	dcQosFlowPerTNLInformationItem := buildDCQosFlowPerTNLInformationItem(xnUe.GetDlTeid(), g.ranN3Ip)
@@ -185,10 +193,12 @@ func xnPduSessionResourceSetupProcessor(g *Gnb, conn net.Conn, imsi string, msg 
 	g.dlTeidToUe.Store(hex.EncodeToString(xnUe.GetDlTeid()), xnUe)
 	g.XnLog.Debugf("Stored XN UE %s with DL TEID %s to dlTeidToUe", xnUe.GetIMSI(), hex.EncodeToString(xnUe.GetDlTeid()))
 
-	g.imsiTodlTeidAndUeType.Store(imsi, dlTeidAndUeType{
-		dlTeid: xnUe.GetDlTeid(),
-		ueType: constant.UE_TYPE_XN,
-	})
+	g.imsiTodlTeidAndUeType.Store(
+		dataPlaneSessionKey(imsi, int64(sessionID)),
+		dlTeidAndUeType{
+			dlTeid: xnUe.GetDlTeid(),
+			ueType: constant.UE_TYPE_XN,
+		})
 	g.XnLog.Debugf("Sent DL TEID %s to imsiTodlTeidAndUeType", hex.EncodeToString(xnUe.GetDlTeid()))
 }
 

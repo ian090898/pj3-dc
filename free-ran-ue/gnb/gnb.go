@@ -502,22 +502,50 @@ func (g *Gnb) setupN1(ranUe *RanUe) error {
 		return fmt.Errorf("error process ue initialization: %v", err)
 	}
 
-	// pdu session establishment
-	ranUe.SetDlTeid(g.teidGenerator.AllocateTeid())
-	if err := g.processUePduSessionEstablishment(ranUe); err != nil {
+	// Establish sessions sequentially over the same N1 connection.
+	// Session 5 will be enabled after UE and data-plane support is ready.
+	for _, sessionID := range []int64{
+		constant.PDU_SESSION_ID,
+		constant.SECOND_PDU_SESSION_ID,
+	} {
+		if err := g.setupPduSession(ranUe, sessionID); err != nil {
+			return fmt.Errorf("error establishing session %d: %w", sessionID, err)
+		}
+	}
+
+	g.RanLog.Infof("UE %s N1 setup complete", ranUe.GetMobileIdentityIMSI())
+	return nil
+}
+
+func (g *Gnb) setupPduSession(ranUe *RanUe, sessionID int64) error {
+	dlTeid := g.teidGenerator.AllocateTeid()
+	if len(dlTeid) != 4 {
+		return fmt.Errorf("failed to allocate DL TEID for session %d", sessionID)
+	}
+	ranUe.SetPduSessionDlTeid(sessionID, dlTeid)
+
+	if err := g.processUePduSessionEstablishment(ranUe, sessionID); err != nil {
 		return err
 	}
 
-	g.dlTeidToUe.Store(hex.EncodeToString(ranUe.GetDlTeid()), ranUe)
-	g.GtpLog.Debugf("Stored RAN UE %s with DL TEID %s to dlTeidToUe", ranUe.GetMobileIdentityIMSI(), hex.EncodeToString(ranUe.GetDlTeid()))
+	endpoint := &ranPduSessionEndpoint{
+		ranUe:     ranUe,
+		sessionID: sessionID,
+	}
+	g.dlTeidToUe.Store(hex.EncodeToString(dlTeid), endpoint)
 
-	g.imsiTodlTeidAndUeType.Store(ranUe.GetMobileIdentityIMSI(), dlTeidAndUeType{
-		dlTeid: ranUe.GetDlTeid(),
-		ueType: constant.UE_TYPE_RAN,
-	})
-	g.GtpLog.Debugf("Sent DL TEID %s to imsiTodlTeidAndUeType", hex.EncodeToString(ranUe.GetDlTeid()))
+	g.imsiTodlTeidAndUeType.Store(
+		dataPlaneSessionKey(ranUe.GetMobileIdentityIMSI(), sessionID),
+		dlTeidAndUeType{
+			dlTeid: dlTeid,
+			ueType: constant.UE_TYPE_RAN,
+		},
+	)
 
-	g.RanLog.Infof("UE %s N1 setup complete", ranUe.GetMobileIdentityIMSI())
+	g.GtpLog.Infof(
+		"Registered PDU session %d with DL TEID %s",
+		sessionID, hex.EncodeToString(dlTeid),
+	)
 	return nil
 }
 
@@ -603,6 +631,7 @@ func (g *Gnb) handleRanConnection(ctx context.Context, ranUe *RanUe) {
 			g.RanLog.Errorf("Error closing UE connection: %v", err)
 		}
 		g.RanLog.Infof("Closed UE connection from: %v", ranUe.GetN1Conn().RemoteAddr())
+		g.unregisterRanUeEndpoints(ranUe)
 		ranUe.Release(g.ranUeNgapIdGenerator, g.teidGenerator)
 		g.ranUeConns.Delete(ranUe.GetRanUeId())
 	}()
@@ -645,10 +674,18 @@ func (g *Gnb) startDataPlaneProcessor() {
 	}
 }
 
-func (g *Gnb) handleUeDataPlaneInitialPacket(ueAddress *net.UDPAddr, imsi string) {
+func (g *Gnb) handleUeDataPlaneInitialPacket(ueAddress *net.UDPAddr, identity string) {
+	imsi, sessionID, err := parseUeDataPlaneIdentity(identity)
+	if err != nil {
+		g.RanLog.Warnf("Invalid UE data plane initial packet: %v", err)
+		return
+	}
+
+	sessionKey := dataPlaneSessionKey(imsi, sessionID)
+
 	var dlTeidAndUeTypeInstance dlTeidAndUeType
 	for try := 0; ; try += 1 {
-		dlTeidAndUeTypeValue, exists := g.imsiTodlTeidAndUeType.Load(imsi)
+		dlTeidAndUeTypeValue, exists := g.imsiTodlTeidAndUeType.Load(sessionKey)
 		if !exists {
 			if try == 100 {
 				g.RanLog.Errorf("No DL TEID and UE type found for IMSI: %s", imsi)
@@ -661,7 +698,7 @@ func (g *Gnb) handleUeDataPlaneInitialPacket(ueAddress *net.UDPAddr, imsi string
 		}
 	}
 
-	g.imsiTodlTeidAndUeType.Delete(imsi)
+	g.imsiTodlTeidAndUeType.Delete(sessionKey)
 
 	ue, exists := g.dlTeidToUe.Load(hex.EncodeToString(dlTeidAndUeTypeInstance.dlTeid))
 	if !exists {
@@ -671,9 +708,19 @@ func (g *Gnb) handleUeDataPlaneInitialPacket(ueAddress *net.UDPAddr, imsi string
 
 	switch dlTeidAndUeTypeInstance.ueType {
 	case constant.UE_TYPE_RAN:
-		ue.(*RanUe).SetDataPlaneAddress(ueAddress)
-		g.addressToUe.Store(ueAddress.String(), ue)
-		g.RanLog.Infof("Set data plane address %s for UE: %s", ueAddress.String(), ue.(*RanUe).GetMobileIdentityIMSI())
+		endpoint, ok := ue.(*ranPduSessionEndpoint)
+		if !ok {
+			g.RanLog.Warnf("Invalid RAN endpoint for session %d", sessionID)
+			return
+		}
+
+		endpoint.SetDataPlaneAddress(ueAddress)
+		g.addressToUe.Store(ueAddress.String(), endpoint)
+
+		g.RanLog.Infof(
+			"UE %s session %d data plane address: %s",
+			imsi, sessionID, ueAddress.String(),
+		)
 	case constant.UE_TYPE_XN:
 		ue.(*XnUe).SetDataPlaneAddress(ueAddress)
 		g.addressToUe.Store(ueAddress.String(), ue)
@@ -689,6 +736,14 @@ func (g *Gnb) handleUeDataPlanePacket(ueAddress *net.UDPAddr, buffer []byte) {
 	}
 
 	switch u := ue.(type) {
+	case *ranPduSessionEndpoint:
+		teid := u.GetUlTeid()
+		if len(teid) != 4 {
+			g.GtpLog.Warnf("Session %d has invalid UL TEID", u.sessionID)
+			return
+		}
+		go formatGtpPacketAndWriteToGtpChannel(teid, buffer, g.gtpChannel, g.GnbLogger)
+
 	case *RanUe:
 		go formatGtpPacketAndWriteToGtpChannel(u.GetUlTeid(), buffer, g.gtpChannel, g.GnbLogger)
 	case *XnUe:
@@ -809,7 +864,7 @@ func (g *Gnb) processUeInitialization(ranUe *RanUe) error {
 	return nil
 }
 
-func (g *Gnb) processUePduSessionEstablishment(ranUe *RanUe) error {
+func (g *Gnb) processUePduSessionEstablishment(ranUe *RanUe, sessionID int64) error {
 	g.NgapLog.Infof("Processing UE %s PDU session establishment", ranUe.GetMobileIdentityIMSI())
 
 	// receive pdu session establishment request from UE and send to AMF
@@ -836,8 +891,17 @@ func (g *Gnb) processUePduSessionEstablishment(ranUe *RanUe) error {
 
 	// wait dispatcher to receive ngap pdu session resource setup request from AMF
 
-	<-ranUe.GetPduSessionEstablishmentCompleteChan()
-	g.NgapLog.Infof("UE %s PDU session establishment completed", ranUe.GetMobileIdentityIMSI())
+	completedID, ok := <-ranUe.GetPduSessionEstablishmentCompleteChan()
+	if !ok || completedID != sessionID {
+		return fmt.Errorf(
+			"unexpected PDU session completion: got %d, expected %d",
+			completedID, sessionID,
+		)
+	}
+	g.NgapLog.Infof(
+		"UE %s PDU session %d establishment completed",
+		ranUe.GetMobileIdentityIMSI(), sessionID,
+	)
 	return nil
 }
 

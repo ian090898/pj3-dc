@@ -49,13 +49,12 @@ type RanUe struct {
 
 	mobileIdentity5GS *ie.MobileId5GS
 
-	ulTeid []byte
-	dlTeid []byte
+	pduSessions ranPduSessionTable
 
 	n1Conn           net.Conn
 	dataPlaneAddress *net.UDPAddr
 
-	pduSessionEstablishmentCompleteChan    chan struct{}
+	pduSessionEstablishmentCompleteChan    chan int64
 	ueContextReleaseCompleteChan           chan struct{}
 	pduSessionModifyIndicationCompleteChan chan struct{}
 
@@ -77,7 +76,7 @@ func NewRanUe(n1Conn net.Conn, ranUeNgapIdGenerator *RanUeNgapIdGenerator) *RanU
 
 		n1Conn: n1Conn,
 
-		pduSessionEstablishmentCompleteChan:    make(chan struct{}),
+		pduSessionEstablishmentCompleteChan:    make(chan int64),
 		ueContextReleaseCompleteChan:           make(chan struct{}),
 		pduSessionModifyIndicationCompleteChan: make(chan struct{}),
 
@@ -88,7 +87,9 @@ func NewRanUe(n1Conn net.Conn, ranUeNgapIdGenerator *RanUeNgapIdGenerator) *RanU
 
 func (r *RanUe) Release(ranUeNgapIdGenerator *RanUeNgapIdGenerator, teidGenerator *TeidGenerator) {
 	ranUeNgapIdGenerator.ReleaseRanUeId(r.ranUeNgapId)
-	teidGenerator.ReleaseTeid(r.dlTeid)
+	for _, dlTeid := range r.pduSessions.drainDlTeids() {
+		teidGenerator.ReleaseTeid(dlTeid)
+	}
 	close(r.pduSessionEstablishmentCompleteChan)
 	close(r.ueContextReleaseCompleteChan)
 	close(r.pduSessionModifyIndicationCompleteChan)
@@ -114,11 +115,11 @@ func (r *RanUe) GetMobileIdentityIMSI() string {
 }
 
 func (r *RanUe) GetUlTeid() []byte {
-	return r.ulTeid
+	return r.GetPduSessionUlTeid(constant.PDU_SESSION_ID)
 }
 
 func (r *RanUe) GetDlTeid() []byte {
-	return r.dlTeid
+	return r.GetPduSessionDlTeid(constant.PDU_SESSION_ID)
 }
 
 func (r *RanUe) GetN1Conn() net.Conn {
@@ -142,18 +143,18 @@ func (r *RanUe) SetMobileIdentity5GS(mobileIdentity5GS *ie.MobileId5GS) {
 }
 
 func (r *RanUe) SetUlTeid(ulTeid []byte) {
-	r.ulTeid = ulTeid
+	r.SetPduSessionUlTeid(constant.PDU_SESSION_ID, ulTeid)
 }
 
 func (r *RanUe) SetDlTeid(dlTeid []byte) {
-	r.dlTeid = dlTeid
+	r.SetPduSessionDlTeid(constant.PDU_SESSION_ID, dlTeid)
 }
 
 func (r *RanUe) SetDataPlaneAddress(dataPlaneAddress *net.UDPAddr) {
 	r.dataPlaneAddress = dataPlaneAddress
 }
 
-func (r *RanUe) GetPduSessionEstablishmentCompleteChan() chan struct{} {
+func (r *RanUe) GetPduSessionEstablishmentCompleteChan() chan int64 {
 	return r.pduSessionEstablishmentCompleteChan
 }
 

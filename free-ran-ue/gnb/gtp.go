@@ -154,6 +154,30 @@ func forwardPacketToUe(gtpPacket []byte, ranDataPlaneServer *net.UDPConn, dlTeid
 	}
 
 	switch u := ue.(type) {
+	case *ranPduSessionEndpoint:
+		dataPlaneAddress := u.GetDataPlaneAddress()
+		if dataPlaneAddress == nil {
+			gnbLogger.GtpLog.Warnf(
+				"Session %d has no UE data plane address",
+				u.sessionID,
+			)
+			return
+		}
+
+		n, err := ranDataPlaneServer.WriteToUDP(payload, dataPlaneAddress)
+		if err != nil {
+			gnbLogger.GtpLog.Warnf(
+				"Error forwarding session %d downlink packet: %v",
+				u.sessionID, err,
+			)
+			return
+		}
+
+		gnbLogger.GtpLog.Tracef(
+			"Forwarded %d bytes to session %d",
+			n, u.sessionID,
+		)
+
 	case *RanUe:
 		gnbLogger.GtpLog.Debugf("Loaded UE %s for DL TEID: %s", u.GetMobileIdentityIMSI(), teid)
 		dataPlaneAddress := u.GetDataPlaneAddress()

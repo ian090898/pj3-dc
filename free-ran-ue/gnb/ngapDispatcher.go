@@ -154,26 +154,28 @@ func (d *ngapDispatcher) pduSessionResourceSetupProcessor(g *Gnb, msg *message.P
 	amfUeNgapId := msg.AMFUENGAPID.Value
 	ranUeNgapId := msg.RANUENGAPID.Value
 
-	var (
-		nasPdu                                 []byte
-		pduSessionResourceSetupRequestTransfer ie.PDUSessionResourceSetupRequestTransfer
-	)
+	sessionID, err := pduSessionIDFromSetupRequest(msg)
+	if err != nil {
+		g.NgapLog.Errorf("Invalid PDU session resource setup: %v", err)
+		return
+	}
 
-	for _, pduSessionResourceSetupItem := range msg.PDUSessionResourceSetupListSUReq.List {
-		if pduSessionResourceSetupItem.PDUSessionNASPDU != nil {
-			nasPdu = make([]byte, len(pduSessionResourceSetupItem.PDUSessionNASPDU.Value))
-			copy(nasPdu, pduSessionResourceSetupItem.PDUSessionNASPDU.Value)
-			g.NgapLog.Tracef("Get PDU Session Resource Setup NASPDU: %+v", nasPdu)
-		}
+	setupItem := msg.PDUSessionResourceSetupListSUReq.List[0]
+	if setupItem.PDUSessionNASPDU == nil ||
+		setupItem.PDUSessionResourceSetupRequestTransfer == nil {
+		g.NgapLog.Errorf("Missing PDU session %d NAS PDU or transfer", sessionID)
+		return
+	}
 
-		if pduSessionResourceSetupItem.PDUSessionResourceSetupRequestTransfer == nil {
-			continue
-		}
-		if err := ie.UnmarshalBinary(*pduSessionResourceSetupItem.PDUSessionResourceSetupRequestTransfer, &pduSessionResourceSetupRequestTransfer); err != nil {
-			g.NgapLog.Errorf("Error unmarshal pdu session resource setup request transfer: %v", err)
-			return
-		}
-		g.NgapLog.Tracef("Get PDU Session Resource Setup Request Transfer: %+v", pduSessionResourceSetupRequestTransfer)
+	nasPdu := append([]byte(nil), setupItem.PDUSessionNASPDU.Value...)
+
+	var pduSessionResourceSetupRequestTransfer ie.PDUSessionResourceSetupRequestTransfer
+	if err := ie.UnmarshalBinary(
+		*setupItem.PDUSessionResourceSetupRequestTransfer,
+		&pduSessionResourceSetupRequestTransfer,
+	); err != nil {
+		g.NgapLog.Errorf("Error decoding session %d setup transfer: %v", sessionID, err)
+		return
 	}
 
 	ueValue, exist := g.ranUeConns.Load(ranUeNgapId)
@@ -194,18 +196,41 @@ func (d *ngapDispatcher) pduSessionResourceSetupProcessor(g *Gnb, msg *message.P
 				continue
 			}
 			if gtpTunnel, ok := item.ULNGUUPTNLInformation.Choice.(*ie.GTPTunnel); ok && gtpTunnel.GTPTEID != nil {
-				ranUe.SetUlTeid(gtpTunnel.GTPTEID.Value)
+				ranUe.SetPduSessionUlTeid(sessionID, gtpTunnel.GTPTEID.Value)
 			}
 		}
 	}
 
-	var (
-		qosFlowPerTNLInformationItem ie.QosFlowPerTNLInformationItem
-		err                          error
+	if len(ranUe.GetPduSessionUlTeid(sessionID)) != 4 {
+		g.NgapLog.Errorf("Session %d has no valid UL TEID", sessionID)
+		return
+	}
+
+	dlTeid := ranUe.GetPduSessionDlTeid(sessionID)
+	if len(dlTeid) == 0 {
+		dlTeid = g.teidGenerator.AllocateTeid()
+		if len(dlTeid) != 4 {
+			g.NgapLog.Errorf("Could not allocate DL TEID for session %d", sessionID)
+			return
+		}
+		ranUe.SetPduSessionDlTeid(sessionID, dlTeid)
+	}
+
+	var qosFlowPerTNLInformationItem ie.QosFlowPerTNLInformationItem
+	useSecondary := shouldUseSecondaryRan(
+		ranUe.IsNrdcActivated(),
+		sessionID,
 	)
-	if ranUe.IsNrdcActivated() {
+
+	g.NgapLog.Infof(
+		"PDU session %d placement: secondary=%t",
+		sessionID, useSecondary,
+	)
+
+	if useSecondary {
 		if qosFlowPerTNLInformationItem, err = g.xnPduSessionResourceSetupRequestTransfer(ranUe.GetMobileIdentityIMSI(), ngapRaw); err != nil {
 			g.XnLog.Warnf("Error xn pdu session resource setup request transfer: %v", err)
+			return
 		}
 	}
 
@@ -217,14 +242,14 @@ func (d *ngapDispatcher) pduSessionResourceSetupProcessor(g *Gnb, msg *message.P
 	g.NgapLog.Tracef("Sent %d bytes of pdu session resource setup NASPDU to UE", n)
 	g.NgapLog.Debugln("Send pdu session resource setup NASPDU to UE")
 
-	ngapPduSessionResourceSetupResponseTransfer, err := getPduSessionResourceSetupResponseTransfer(ranUe.GetDlTeid(), g.ranN3Ip, 1, g.staticNrdc, qosFlowPerTNLInformationItem)
+	ngapPduSessionResourceSetupResponseTransfer, err := getSetupTransferForPlacement(dlTeid, g.ranN3Ip, 1, useSecondary, qosFlowPerTNLInformationItem)
 	if err != nil {
 		g.NgapLog.Errorf("Error get pdu session resource setup response transfer: %v", err)
 		return
 	}
 	g.NgapLog.Tracef("Get pdu session resource setup response transfer: %+v", ngapPduSessionResourceSetupResponseTransfer)
 
-	ngapPduSessionResourceSetupResponse, err := getPduSessionResourceSetupResponse(ranUe.GetAmfUeId(), ranUe.GetRanUeId(), constant.PDU_SESSION_ID, ngapPduSessionResourceSetupResponseTransfer)
+	ngapPduSessionResourceSetupResponse, err := getPduSessionResourceSetupResponse(ranUe.GetAmfUeId(), ranUe.GetRanUeId(), sessionID, ngapPduSessionResourceSetupResponseTransfer)
 	if err != nil {
 		g.NgapLog.Errorf("Error get pdu session resource setup response: %v", err)
 		return
@@ -239,7 +264,7 @@ func (d *ngapDispatcher) pduSessionResourceSetupProcessor(g *Gnb, msg *message.P
 	g.NgapLog.Tracef("Sent %d bytes of pdu session resource setup response to AMF", n)
 	g.NgapLog.Debugln("Send pdu session resource setup response to AMF")
 
-	ranUe.GetPduSessionEstablishmentCompleteChan() <- struct{}{}
+	ranUe.GetPduSessionEstablishmentCompleteChan() <- sessionID
 }
 
 func (d *ngapDispatcher) ueContextReleaseProcessor(g *Gnb, msg *message.UEContextReleaseCommand) {
