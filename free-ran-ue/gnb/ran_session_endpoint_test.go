@@ -66,4 +66,46 @@ func TestRanSessionEndpointIsolation(t *testing.T) {
 	if ep4.GetDataPlaneAddress() == nil {
 		t.Fatal("clearing session 5 affected session 4")
 	}
+
+	// Verify that two PDU sessions can retain different UDP listeners.
+	server4, err := net.ListenUDP("udp", &net.UDPAddr{
+		IP:   net.IPv4(127, 0, 0, 1),
+		Port: 0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := server4.Close(); err != nil {
+			t.Errorf("failed to close Session 4 UDP listener: %v", err)
+		}
+	}()
+
+	server5, err := net.ListenUDP("udp", &net.UDPAddr{
+		IP:   net.IPv4(127, 0, 0, 1),
+		Port: 0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := server5.Close(); err != nil {
+			t.Errorf("failed to close Session 5 UDP listener: %v", err)
+		}
+	}()
+
+	ep4.SetDataPlaneServer(server4)
+	ep5.SetDataPlaneServer(server5)
+
+	if ep4.GetDataPlaneServer() != server4 {
+		t.Fatal("Session 4 listener mismatch")
+	}
+
+	if ep5.GetDataPlaneServer() != server5 {
+		t.Fatal("Session 5 listener mismatch")
+	}
+
+	if ep4.GetDataPlaneServer() == ep5.GetDataPlaneServer() {
+		t.Fatal("two sessions must not share the same listener")
+	}
 }

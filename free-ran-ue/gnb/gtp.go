@@ -164,7 +164,16 @@ func forwardPacketToUe(gtpPacket []byte, ranDataPlaneServer *net.UDPConn, dlTeid
 			return
 		}
 
-		n, err := ranDataPlaneServer.WriteToUDP(payload, dataPlaneAddress)
+		sessionServer := u.GetDataPlaneServer()
+		if sessionServer == nil {
+			gnbLogger.GtpLog.Warnf(
+				"Session %d has no RAN data plane listener",
+				u.sessionID,
+			)
+			return
+		}
+
+		n, err := sessionServer.WriteToUDP(payload, dataPlaneAddress)
 		if err != nil {
 			gnbLogger.GtpLog.Warnf(
 				"Error forwarding session %d downlink packet: %v",

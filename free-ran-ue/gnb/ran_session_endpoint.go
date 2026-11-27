@@ -11,8 +11,9 @@ type ranPduSessionEndpoint struct {
 	ranUe     *RanUe
 	sessionID int64
 
-	mu      sync.RWMutex
-	address *net.UDPAddr
+	mu              sync.RWMutex
+	address         *net.UDPAddr
+	dataPlaneServer *net.UDPConn
 }
 
 func (e *ranPduSessionEndpoint) SetDataPlaneAddress(addr *net.UDPAddr) {
@@ -40,6 +41,22 @@ func (e *ranPduSessionEndpoint) GetDataPlaneAddress() *net.UDPAddr {
 	copyAddr := *e.address
 	copyAddr.IP = append(net.IP(nil), e.address.IP...)
 	return &copyAddr
+}
+
+// SetDataPlaneServer records the UDP listener used by this session.
+func (e *ranPduSessionEndpoint) SetDataPlaneServer(server *net.UDPConn) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	e.dataPlaneServer = server
+}
+
+// GetDataPlaneServer returns the listener for downlink responses.
+func (e *ranPduSessionEndpoint) GetDataPlaneServer() *net.UDPConn {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	return e.dataPlaneServer
 }
 
 func (e *ranPduSessionEndpoint) GetUlTeid() []byte {

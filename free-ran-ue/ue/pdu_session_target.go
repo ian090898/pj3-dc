@@ -29,7 +29,17 @@ func (u *Ue) dataPlaneTargetForSession(
 
 	case constant.SECOND_PDU_SESSION_ID:
 		if !u.isNrdcEnabled() {
-			return master, nil
+			if u.ranDataPlanePort2 <= 0 || u.ranDataPlanePort2 > 65535 {
+				return pduSessionTarget{}, fmt.Errorf(
+					"invalid second RAN data plane port: %d",
+					u.ranDataPlanePort2,
+				)
+			}
+			return pduSessionTarget{
+				remoteIP:   u.ranDataPlaneIp,
+				remotePort: u.ranDataPlanePort2,
+				localIP:    u.localDataPlaneIp,
+			}, nil
 		}
 
 		return pduSessionTarget{

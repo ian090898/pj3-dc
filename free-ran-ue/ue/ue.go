@@ -71,6 +71,7 @@ type Ue struct {
 
 	ranControlPlanePort int
 	ranDataPlanePort    int
+	ranDataPlanePort2   int
 
 	ranControlPlaneConn net.Conn
 	ranDataPlaneConn    net.Conn
@@ -147,6 +148,7 @@ func NewUe(config *model.UeConfig, logger *logger.UeLogger) *Ue {
 
 		ranControlPlanePort: config.Ue.RanControlPlanePort,
 		ranDataPlanePort:    config.Ue.RanDataPlanePort,
+		ranDataPlanePort2:   config.Ue.RanDataPlanePort2,
 
 		mcc:  config.Ue.PlmnId.Mcc,
 		mnc:  config.Ue.PlmnId.Mnc,
