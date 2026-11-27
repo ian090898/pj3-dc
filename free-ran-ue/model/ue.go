@@ -14,6 +14,7 @@ type UeIE struct {
 
 	RanControlPlanePort int `yaml:"ranControlPlanePort" valid:"required"`
 	RanDataPlanePort    int `yaml:"ranDataPlanePort" valid:"required"`
+	RanDataPlanePort2   int `yaml:"ranDataPlanePort2"`
 
 	PlmnId PlmnIdIE `yaml:"plmnId" valid:"required"`
 	Msin   string   `yaml:"msin" valid:"required"`

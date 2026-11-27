@@ -21,6 +21,7 @@ type GnbIE struct {
 
 	RanControlPlanePort int `yaml:"ranControlPlanePort" valid:"required"`
 	RanDataPlanePort    int `yaml:"ranDataPlanePort" valid:"required"`
+	RanDataPlanePort2   int `yaml:"ranDataPlanePort2"`
 
 	GnbId   string `yaml:"gnbId" valid:"required"`
 	GnbName string `yaml:"gnbName" valid:"required"`

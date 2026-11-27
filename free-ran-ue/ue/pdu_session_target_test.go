@@ -8,9 +8,10 @@ import (
 
 func TestPduSessionDataPlaneTargets(t *testing.T) {
 	u := &Ue{
-		ranDataPlaneIp:   "10.0.2.3",
-		ranDataPlanePort: 31414,
-		localDataPlaneIp: "10.0.2.2",
+		ranDataPlaneIp:    "10.0.2.3",
+		ranDataPlanePort:  31414,
+		ranDataPlanePort2: 31416,
+		localDataPlaneIp:  "10.0.2.2",
 		nrdc: nrdc{
 			enable: false,
 			dcRanDataPlane: dcRanDataPlane{
@@ -25,30 +26,35 @@ func TestPduSessionDataPlaneTargets(t *testing.T) {
 		nrdc      bool
 		sessionID uint8
 		wantIP    string
+		wantPort  int
 	}{
 		{
 			"master only session 4",
 			false,
 			constant.PDU_SESSION_ID,
 			"10.0.2.3",
+			31414,
 		},
 		{
 			"master only session 5",
 			false,
 			constant.SECOND_PDU_SESSION_ID,
 			"10.0.2.3",
+			31416,
 		},
 		{
 			"static NRDC session 4",
 			true,
 			constant.PDU_SESSION_ID,
 			"10.0.2.3",
+			31414,
 		},
 		{
 			"static NRDC session 5",
 			true,
 			constant.SECOND_PDU_SESSION_ID,
 			"10.0.2.4",
+			31414,
 		},
 	}
 
@@ -74,10 +80,12 @@ func TestPduSessionDataPlaneTargets(t *testing.T) {
 				)
 			}
 
-			if target.remotePort != 31414 {
+			if target.remotePort != tt.wantPort {
 				t.Fatalf(
-					"unexpected port %d",
+					"session %d port = %d, want %d",
+					tt.sessionID,
 					target.remotePort,
+					tt.wantPort,
 				)
 			}
 		})

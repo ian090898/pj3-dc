@@ -63,6 +63,7 @@ type Gnb struct {
 
 	ranControlPlanePort int
 	ranDataPlanePort    int
+	ranDataPlanePort2   int
 
 	n2Conn *sctp.SCTPConn
 	n3Conn *net.UDPConn
@@ -80,6 +81,7 @@ type Gnb struct {
 
 	ranControlPlaneListener *net.Listener
 	ranDataPlaneServer      *net.UDPConn
+	ranDataPlaneServer2     *net.UDPConn
 	xnListener              *net.Listener
 
 	ranUeConns            sync.Map // ranUeId -> *RanUe
@@ -156,6 +158,7 @@ func NewGnb(config *model.GnbConfig, gnbLogger *logger.GnbLogger) *Gnb {
 		ranN3Port:           config.Gnb.RanN3Port,
 		ranControlPlanePort: config.Gnb.RanControlPlanePort,
 		ranDataPlanePort:    config.Gnb.RanDataPlanePort,
+		ranDataPlanePort2:   config.Gnb.RanDataPlanePort2,
 
 		gnbId:   gnbId,
 		gnbName: config.Gnb.GnbName,
@@ -273,7 +276,10 @@ func (g *Gnb) Start(ctx context.Context) error {
 
 	g.startGtpProcessor(ctx)
 
-	go g.startDataPlaneProcessor()
+	go g.startDataPlaneProcessor(g.ranDataPlaneServer)
+	if g.ranDataPlaneServer2 != nil {
+		go g.startDataPlaneProcessor(g.ranDataPlaneServer2)
+	}
 
 	go func() {
 		if !g.xnInterface.enable {
@@ -325,7 +331,14 @@ func (g *Gnb) Stop() {
 	g.RanLog.Infoln("Stopping GNB")
 
 	g.stopApiServer()
-
+	if g.ranDataPlaneServer2 != nil {
+		if err := g.ranDataPlaneServer2.Close(); err != nil {
+			g.RanLog.Errorf(
+				"Error stopping second RAN data plane listener: %v",
+				err,
+			)
+		}
+	}
 	if err := g.ranDataPlaneServer.Close(); err != nil {
 		g.RanLog.Errorf("Error stopping ran data plane listener: %v", err)
 		return
@@ -611,17 +624,60 @@ func (g *Gnb) startRanControlPlaneListener() error {
 func (g *Gnb) startRanDataPlaneServer() error {
 	g.RanLog.Infoln("Starting RAN data plane server")
 
-	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP(g.ranDataPlaneIp), Port: g.ranDataPlanePort})
+	// Primary UDP listener (Session 4).
+	primary, err := net.ListenUDP("udp", &net.UDPAddr{
+		IP:   net.ParseIP(g.ranDataPlaneIp),
+		Port: g.ranDataPlanePort,
+	})
 	if err != nil {
 		return err
 	}
-	g.ranDataPlaneServer = conn
+	g.ranDataPlaneServer = primary
 
-	g.RanLog.Infoln("======= RAN Data Plane Info ========")
-	g.RanLog.Infof("RAN Data Plane access address: %s:%d", g.ranDataPlaneIp, g.ranDataPlanePort)
-	g.RanLog.Infoln("====================================")
+	g.RanLog.Infof(
+		"Primary RAN data plane: %s:%d",
+		g.ranDataPlaneIp,
+		g.ranDataPlanePort,
+	)
 
-	g.RanLog.Infoln("RAN data plane server started")
+	// Second UDP listener (Single-RAN Session 5).
+	if g.ranDataPlanePort2 > 0 {
+		if g.ranDataPlanePort2 == g.ranDataPlanePort ||
+			g.ranDataPlanePort2 > 65535 {
+			_ = primary.Close()
+			g.ranDataPlaneServer = nil
+
+			return fmt.Errorf(
+				"invalid second RAN data plane port: %d",
+				g.ranDataPlanePort2,
+			)
+		}
+
+		secondary, err := net.ListenUDP("udp", &net.UDPAddr{
+			IP:   net.ParseIP(g.ranDataPlaneIp),
+			Port: g.ranDataPlanePort2,
+		})
+		if err != nil {
+			_ = primary.Close()
+			g.ranDataPlaneServer = nil
+
+			return fmt.Errorf(
+				"failed to listen on second RAN UDP port %d: %w",
+				g.ranDataPlanePort2,
+				err,
+			)
+		}
+
+		g.ranDataPlaneServer2 = secondary
+
+		g.RanLog.Infof(
+			"Second RAN data plane: %s:%d",
+			g.ranDataPlaneIp,
+			g.ranDataPlanePort2,
+		)
+	}
+
+	g.RanLog.Infoln("RAN data plane servers started")
 	return nil
 }
 
@@ -649,10 +705,10 @@ func (g *Gnb) handleRanConnection(ctx context.Context, ranUe *RanUe) {
 	g.RanLog.Infof("UE %s N1 released", ranUe.GetMobileIdentityIMSI())
 }
 
-func (g *Gnb) startDataPlaneProcessor() {
+func (g *Gnb) startDataPlaneProcessor(server *net.UDPConn) {
 	buffer := make([]byte, 4096)
 	for {
-		n, ueAddress, err := g.ranDataPlaneServer.ReadFromUDP(buffer)
+		n, ueAddress, err := server.ReadFromUDP(buffer)
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
 				g.RanLog.Infoln("RAN data plane server closed")
@@ -667,14 +723,22 @@ func (g *Gnb) startDataPlaneProcessor() {
 		tmp := make([]byte, n)
 		copy(tmp, buffer[:n])
 		if n > len(constant.UE_DATA_PLANE_INITIAL_PACKET) && string(tmp[:len(constant.UE_DATA_PLANE_INITIAL_PACKET)]) == constant.UE_DATA_PLANE_INITIAL_PACKET {
-			go g.handleUeDataPlaneInitialPacket(ueAddress, string(tmp[len(constant.UE_DATA_PLANE_INITIAL_PACKET)+1:n]))
+			go g.handleUeDataPlaneInitialPacket(
+				server,
+				ueAddress,
+				string(tmp[len(constant.UE_DATA_PLANE_INITIAL_PACKET)+1:n]),
+			)
 		} else {
 			go g.handleUeDataPlanePacket(ueAddress, tmp)
 		}
 	}
 }
 
-func (g *Gnb) handleUeDataPlaneInitialPacket(ueAddress *net.UDPAddr, identity string) {
+func (g *Gnb) handleUeDataPlaneInitialPacket(
+	server *net.UDPConn,
+	ueAddress *net.UDPAddr,
+	identity string,
+) {
 	imsi, sessionID, err := parseUeDataPlaneIdentity(identity)
 	if err != nil {
 		g.RanLog.Warnf("Invalid UE data plane initial packet: %v", err)
@@ -714,6 +778,7 @@ func (g *Gnb) handleUeDataPlaneInitialPacket(ueAddress *net.UDPAddr, identity st
 			return
 		}
 
+		endpoint.SetDataPlaneServer(server)
 		endpoint.SetDataPlaneAddress(ueAddress)
 		g.addressToUe.Store(ueAddress.String(), endpoint)
 
